@@ -291,7 +291,7 @@ func CheckResponse(r *http.Response) error {
 	errorResponse := &ErrorResponse{Response: r}
 	data, err := ioutil.ReadAll(r.Body)
 	if err == nil && len(data) > 0 {
-		errorResponse.Raw = data
+		errorResponse.Raw = string(data)
 		err := json.Unmarshal(data, errorResponse)
 		if err != nil {
 			// Silently skip when response body doesn't fit errorresponse structure
