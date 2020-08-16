@@ -56,7 +56,8 @@ type Response struct {
 type ErrorResponse struct {
 	// HTTP response that caused this error
 	Response *http.Response
-
+	// Raw error response in case error doesn't fit known structure
+	Raw string
 	// Type is the error group name (auth_error, request_error, api_error, external_error vs..)
 	Type string `json:"type"`
 	// Code is the error short name (invalid_id, user_not_found)
@@ -272,6 +273,9 @@ func (r *ErrorResponse) Error() string {
 		return fmt.Sprintf("%v %v: %d (request %q) %v",
 			r.Response.Request.Method, r.Response.Request.URL, r.Response.StatusCode, r.RequestID, r.Message)
 	}
+	if r.Message == "" {
+		return r.Raw
+	}
 	return fmt.Sprintf("[%d] %v %v: %v",
 		r.Response.StatusCode, r.Response.Request.Method, r.Response.Request.URL, r.Message)
 }
@@ -287,9 +291,11 @@ func CheckResponse(r *http.Response) error {
 	errorResponse := &ErrorResponse{Response: r}
 	data, err := ioutil.ReadAll(r.Body)
 	if err == nil && len(data) > 0 {
+		errorResponse.Raw = data
 		err := json.Unmarshal(data, errorResponse)
 		if err != nil {
-			return err
+			// Silently skip when response body doesn't fit errorresponse structure
+			return errorResponse
 		}
 	}
 
