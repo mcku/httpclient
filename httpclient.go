@@ -40,6 +40,9 @@ type HttpClient struct {
 
 	// Optional function called after every successful request
 	onRequestCompleted RequestCompletionCallback
+
+	// trace dump
+	Debug bool
 }
 
 // RequestCompletionCallback defines the type of the request callback function
@@ -50,6 +53,17 @@ type Response struct {
 	*http.Response
 
 	Rate
+}
+
+type ErrorResponseDecoder interface {
+	// keep compatible with json decoder naming
+	Error() string
+	RawErrorStr() string
+	Decode(errData []byte, errV interface{}) error
+}
+
+type errorResponseDecoder struct {
+	ErrorResponse
 }
 
 // An ErrorResponse reports the error caused by an API request
@@ -136,6 +150,14 @@ func SetUserAgent(ua string) ClientOpt {
 	}
 }
 
+// Request-Response trace dumps on stdout
+func SetTracingEnabled() ClientOpt {
+	return func(c *HttpClient) error {
+		c.Debug = true
+		return nil
+	}
+}
+
 // NewRequest creates an API request. A relative URL can be provided in urlStr, which will be resolved to the
 // BaseURL of the Client. Relative URLS should always be specified without a preceding slash. If specified, the
 // value pointed to by body is JSON encoded and included in as the request body.
@@ -164,6 +186,15 @@ func (c *HttpClient) NewRequest(ctx context.Context, method string, urlStr strin
 		if err := opt(req); err != nil {
 			return nil, err
 		}
+	}
+
+	if c.Debug {
+		// pretty print v
+		fmt.Printf("********************************************************************************\n\n")
+		fmt.Printf("Request %s %s - %s\n\n", req.Method, req.URL.String(), time.Now().Format(time.RFC3339))
+		debugPrintJSON(body)
+		fmt.Printf("\n\n")
+		fmt.Printf("********************************************************************************\n\n")
 	}
 
 	req.Header.Add("Content-Type", mediaType)
@@ -228,7 +259,7 @@ func (r *Response) populateRate() {
 // Do sends an API request and returns the API response. The API response is JSON decoded and stored in the value
 // pointed to by v, or returned as an error if an API error has occurred. If v implements the io.Writer interface,
 // the raw response will be written to v, without attempting to decode it.
-func (c *HttpClient) Do(req *http.Request, v interface{}) (*Response, error) {
+func (c *HttpClient) Do(req *http.Request, v interface{}, errV interface{}) (*Response, error) {
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -246,25 +277,38 @@ func (c *HttpClient) Do(req *http.Request, v interface{}) (*Response, error) {
 	response := newResponse(resp)
 	c.Rate = response.Rate
 
-	err = CheckResponse(resp)
+	err = CheckResponse(resp, errV)
 	if err != nil {
+		if c.Debug {
+			// pretty print v
+			fmt.Printf("********************************************************************************\n\n")
+			fmt.Printf("Response (Error part) %s %s - %s\n\n", req.Method, req.URL.String(), time.Now().Format(time.RFC3339))
+			debugPrintJSON(errV)
+			fmt.Printf("Response (Non error part) - %s\n\n", time.Now().Format(time.RFC3339))
+			rawData, _ := ioutil.ReadAll(resp.Body)
+			debugPrintJSON(rawData)
+			fmt.Printf("********************************************************************************\n\n")
+		}
 		return response, err
 	}
 
 	if v != nil {
 		if w, ok := v.(io.Writer); ok {
-			_, err := io.Copy(w, resp.Body)
-			if err != nil {
-				return nil, err
-			}
+			_, err = io.Copy(w, resp.Body)
 		} else {
-			err := json.NewDecoder(resp.Body).Decode(v)
-			if err != nil {
-				return nil, err
-			}
+			err = json.NewDecoder(resp.Body).Decode(v)
 		}
 	}
-
+	if c.Debug {
+		// pretty print v
+		fmt.Printf("********************************************************************************\n\n")
+		fmt.Printf("Response %s %s - %s\n\n", req.Method, req.URL.String(), time.Now().Format(time.RFC3339))
+		debugPrintJSON(v)
+		fmt.Printf("********************************************************************************\n\n")
+	}
+	if err != nil {
+		return nil, err
+	}
 	return response, err
 }
 
@@ -283,23 +327,39 @@ func (r *ErrorResponse) Error() string {
 // CheckResponse checks the API response for errors, and returns them if present. A response is considered an
 // error if it has a status code outside the 200 range. API error responses are expected to have either no response
 // body, or a JSON response body that maps to ErrorResponse. Any other response body will be silently ignored.
-func CheckResponse(r *http.Response) error {
+func CheckResponse(r *http.Response, errV interface{}) ErrorResponseDecoder {
 	if c := r.StatusCode; c >= 200 && c <= 299 {
 		return nil
 	}
 
-	errorResponse := &ErrorResponse{Response: r}
+	errorResponse := &errorResponseDecoder{ErrorResponse{Response: r}}
 	data, err := ioutil.ReadAll(r.Body)
 	if err == nil && len(data) > 0 {
+		if errV == nil {
+			err = json.Unmarshal(data, errorResponse)
+		} else {
+			err = errorResponse.Decode(data, errV)
+		}
 		errorResponse.Raw = string(data)
-		err := json.Unmarshal(data, errorResponse)
+
+		// keeping this for verbosity
 		if err != nil {
 			// Silently skip when response body doesn't fit errorresponse structure
 			return errorResponse
 		}
 	}
-
+	errorResponse.Raw = string(data)
 	return errorResponse
+
+}
+
+// Decode decode into errV. Make sure that errV is not nil
+func (e *errorResponseDecoder) Decode(data []byte, errV interface{}) error {
+	return json.Unmarshal(data, errV)
+}
+
+func (e *errorResponseDecoder) RawErrorStr() string {
+	return e.Raw
 }
 
 func (r Rate) String() string {
@@ -343,12 +403,12 @@ func StreamToString(stream io.Reader) string {
 //
 
 // helper function for making an http GET request.
-func (c *HttpClient) Get(ctx context.Context, path string, out interface{}, opts ...RequestOpt) (*Response, error) {
+func (c *HttpClient) Get(ctx context.Context, path string, out interface{}, errOut interface{}, opts ...RequestOpt) (*Response, error) {
 	req, err := c.NewRequest(ctx, "GET", path, nil, opts...)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.Do(req, out)
+	resp, err := c.Do(req, out, errOut)
 	if err != nil {
 		return resp, err
 	}
@@ -357,13 +417,13 @@ func (c *HttpClient) Get(ctx context.Context, path string, out interface{}, opts
 }
 
 // helper function for making an http POST request.
-func (c *HttpClient) Post(ctx context.Context, path string, in, out interface{}, opts ...RequestOpt) (*Response, error) {
+func (c *HttpClient) Post(ctx context.Context, path string, in, out interface{}, errOut interface{}, opts ...RequestOpt) (*Response, error) {
 	req, err := c.NewRequest(ctx, "POST", path, in, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.Do(req, out)
+	resp, err := c.Do(req, out, errOut)
 	if err != nil {
 		return resp, err
 	}
@@ -372,7 +432,7 @@ func (c *HttpClient) Post(ctx context.Context, path string, in, out interface{},
 }
 
 // helper function for making an http PUT request.
-func (c *HttpClient) Put(ctx context.Context, path string, in, out interface{}, opts ...RequestOpt) (*Response, error) {
+func (c *HttpClient) Put(ctx context.Context, path string, in, out interface{}, errOut interface{}, opts ...RequestOpt) (*Response, error) {
 	if in == nil {
 		return nil, NewArgError("PUT body", "cannot be nil")
 	}
@@ -382,7 +442,7 @@ func (c *HttpClient) Put(ctx context.Context, path string, in, out interface{}, 
 		return nil, err
 	}
 
-	resp, err := c.Do(req, out)
+	resp, err := c.Do(req, out, errOut)
 	if err != nil {
 		return resp, err
 	}
@@ -391,7 +451,7 @@ func (c *HttpClient) Put(ctx context.Context, path string, in, out interface{}, 
 }
 
 // helper function for making an http PATCH request.
-func (c *HttpClient) Patch(ctx context.Context, path string, in, out interface{}, opts ...RequestOpt) (*Response, error) {
+func (c *HttpClient) Patch(ctx context.Context, path string, in, out interface{}, errOut interface{}, opts ...RequestOpt) (*Response, error) {
 	if in == nil {
 		return nil, NewArgError("PATCH body", "cannot be nil")
 	}
@@ -401,7 +461,7 @@ func (c *HttpClient) Patch(ctx context.Context, path string, in, out interface{}
 		return nil, err
 	}
 
-	resp, err := c.Do(req, out)
+	resp, err := c.Do(req, out, errOut)
 	if err != nil {
 		return resp, err
 	}
@@ -410,15 +470,32 @@ func (c *HttpClient) Patch(ctx context.Context, path string, in, out interface{}
 }
 
 // helper function for making an http DELETE request.
-func (c *HttpClient) Delete(ctx context.Context, path string, opts ...RequestOpt) (*Response, error) {
+func (c *HttpClient) Delete(ctx context.Context, path string, errOut interface{}, opts ...RequestOpt) (*Response, error) {
 	req, err := c.NewRequest(ctx, "DELETE", path, nil, opts...)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.Do(req, nil)
+	resp, err := c.Do(req, nil, errOut)
 	if err != nil {
 		return resp, err
 	}
 
 	return resp, err
+}
+
+// Use this for making generic http requests with context
+func (c *HttpClient) DoWithContext(ctx context.Context, method string, path string, in interface{}, out interface{}, errOut interface{}, opts ...RequestOpt) (*Response, error) {
+	switch method {
+	case "GET":
+		return c.Get(ctx, path, out, errOut, opts...)
+	case "POST":
+		return c.Post(ctx, path, in, out, errOut, opts...)
+	case "PUT":
+		return c.Put(ctx, path, in, out, errOut, opts...)
+	case "PATCH":
+		return c.Patch(ctx, path, in, out, errOut, opts...)
+	case "DELETE":
+		return c.Delete(ctx, path, errOut, opts...)
+	}
+	return nil, fmt.Errorf("DoWithContext: Unknown method %s", method)
 }
