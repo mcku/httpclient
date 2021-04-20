@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"money-transfer/money-transfer-twcollector-service/utils"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -280,7 +281,7 @@ func (c *HttpClient) Do(req *http.Request, v interface{}, errV interface{}) (*Re
 	err = CheckResponse(resp, errV)
 	if err != nil {
 		if c.Debug {
-			// pretty print v
+			// pretty print errV
 			fmt.Printf("********************************************************************************\n\n")
 			fmt.Printf("Response (Error part) %s %s - %s\n\n", req.Method, req.URL.String(), time.Now().Format(time.RFC3339))
 			debugPrintJSON(errV)
@@ -292,19 +293,35 @@ func (c *HttpClient) Do(req *http.Request, v interface{}, errV interface{}) (*Re
 		return response, err
 	}
 
-	if v != nil {
-		if w, ok := v.(io.Writer); ok {
-			_, err = io.Copy(w, resp.Body)
-		} else {
-			err = json.NewDecoder(resp.Body).Decode(v)
-		}
-	}
 	if c.Debug {
 		// pretty print v
 		fmt.Printf("********************************************************************************\n\n")
 		fmt.Printf("Response %s %s - %s\n\n", req.Method, req.URL.String(), time.Now().Format(time.RFC3339))
-		debugPrintJSON(v)
-		fmt.Printf("********************************************************************************\n\n")
+	}
+	rawData, _ := ioutil.ReadAll(resp.Body)
+	if v != nil {
+		if w, ok := v.(io.Writer); ok {
+			reader := bytes.NewReader(rawData)
+			_, err = io.Copy(w, reader)
+			if c.Debug {
+				debugPrintJSON(w)
+				fmt.Printf("********************************************************************************\n\n")
+			}
+		} else {
+			reader := bytes.NewReader(rawData)
+			err = json.NewDecoder(reader).Decode(v)
+			if c.Debug {
+				var m interface{} = map[string]interface{}{}
+				reader := bytes.NewReader(rawData)
+				if err := json.NewDecoder(reader).Decode(&m); err != nil {
+					fmt.Printf("\nDecoding into %s had errors, displaying raw data instead:\n", utils.ToJSON(v))
+					fmt.Printf("%s\n\n", string(rawData))
+				} else {
+					debugPrintJSON(m)
+				}
+				fmt.Printf("********************************************************************************\n\n")
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
