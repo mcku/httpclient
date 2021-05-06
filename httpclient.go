@@ -96,17 +96,23 @@ type Rate struct {
 	Reset Timestamp `json:"reset"`
 }
 
-func NewHttpClient(baseURL *url.URL, insecureSkipVerify bool) *HttpClient {
-	var client *http.Client
+func NewHttpClientWithClient(baseURL *url.URL, insecureSkipVerify bool, client *http.Client) *HttpClient {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	if baseURL.Scheme == "https" {
 		tlsConfig := &tls.Config{RootCAs: x509.NewCertPool(), InsecureSkipVerify: insecureSkipVerify}
 		transport := &http.Transport{TLSClientConfig: tlsConfig}
-		client = &http.Client{Transport: transport}
-	} else {
-		client = http.DefaultClient
+		// client = &http.Client{Transport: transport}
+		client.Transport = transport
 	}
 
 	return &HttpClient{client: client, BaseURL: baseURL, UserAgent: userAgent}
+}
+
+func NewHttpClient(baseURL *url.URL, insecureSkipVerify bool) *HttpClient {
+	var client *http.Client
+	return NewHttpClientWithClient(baseURL, insecureSkipVerify, client)
 }
 
 // ClientOpt are options for New.
